@@ -1,0 +1,286 @@
+import os
+import time
+from datetime import datetime, timedelta
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+import tkinter as tk
+import pandas as pd
+from gspread.exceptions import APIError
+from openpyxl import Workbook, load_workbook
+import random
+from gspread.exceptions import WorksheetNotFound
+
+# 구글 스프레드시트 인증 정보
+scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+credentials = ServiceAccountCredentials.from_json_keyfile_name('C:/credentials.json', scope)
+client = gspread.authorize(credentials)
+
+
+
+def get_header_indices(header_row):
+    return {header: index for index, header in enumerate(header_row)}
+import re
+
+def convert_to_number(value):
+    if value and isinstance(value, str):
+        # 숫자와 소수점을 제외한 모든 문자 제거
+        cleaned_value = re.sub(r'[^\d.]+', '', value)
+        try:
+            return float(cleaned_value)
+        except ValueError as e:
+            print(f"ValueError: {e}, with value: {cleaned_value}")  # 오류 출력
+            return 0
+    return 0
+
+
+def read_sheet_data_within_date_range(sheet, target_dates):
+    all_dates = sheet.col_values(1)  # 첫 번째 열(주문일자)의 모든 날짜를 가져옴
+    start_row, end_row = None, None
+
+    for index, date in enumerate(all_dates, start=1):  # 인덱스 1부터 시작
+        if date in target_dates:
+            if start_row is None:
+                start_row = index  # 시작 행 인덱스 설정
+            end_row = index  # 끝 행 인덱스 갱신
+
+    if start_row and end_row:
+        # 해당 범위의 데이터를 반환
+        return sheet.get(f"A{start_row}:AF{end_row}")
+    else:
+        # 날짜 범위에 해당하는 데이터가 없는 경우 빈 리스트 반환
+        return []
+
+
+
+
+import pandas as pd
+import numpy as np
+
+def update_google_spreadsheet(data, sheet_name, spreadsheet_url):
+    try:
+        # 비정상적인 값을 처리하기 위해 NaN, inf, -inf를 0으로 변환
+        data = data.replace([np.inf, -np.inf], np.nan).fillna(0)
+
+        # 구글 스프레드시트 작업
+        spreadsheet = client.open_by_url(spreadsheet_url)
+        worksheet = spreadsheet.worksheet(sheet_name)
+        worksheet.clear()  # 기존 데이터를 지우고
+        time.sleep(1)  # 에러 방지를 위한 시간 지연
+
+        worksheet.update([data.columns.values.tolist()] + data.values.tolist())  # 새 데이터를 덮어씌움
+    except APIError as e:
+        print(f"APIError 발생: {e}. 재시도 중...")
+        time.sleep(random.randint(60, 900))  # 1분에서 15분 사이 유동적으로 기다림
+        update_google_spreadsheet(data, sheet_name, spreadsheet_url)  # 재시도
+
+# 구글 스프레드시트에서 데이터를 읽는 함수
+def read_google_spreadsheet(sheet_url, target_dates, required_sheets):
+    credentials = ServiceAccountCredentials.from_json_keyfile_name('C:/credentials.json', scope)
+    client = gspread.authorize(credentials)
+
+    max_retries = 2000
+
+    for attempt in range(max_retries):
+        try:
+            spreadsheet = client.open_by_url(sheet_url)
+            all_data = []
+
+            for sheet_name in required_sheets:
+                try:
+                    sheet = spreadsheet.worksheet(sheet_name)
+                    time.sleep(2)  # 2초 대기
+
+                    data = []
+                    retries = 5
+                    while retries > 0:
+                        try:
+                            values = sheet.get_all_values()
+                            break  # 성공 시 루프 탈출
+                        except Exception as e:
+                            print(f"Error while getting values: {e}, Retries left: {retries}")
+                            retries -= 1
+                            if retries > 0:
+                                time.sleep(120)  # 1분 대기 후 재시도
+
+                    if values is None:  
+                        continue  # 모든 재시도가 실패하면 이 시트를 건너뜀
+
+                    header_row = values[6] 
+                    header_indices = get_header_indices(header_row)
+
+                    for row in values[7:]:
+                        selected_columns_data = []
+                        if len(row) >= max(header_indices.values()):
+                            order_date_raw = row[header_indices['주문일자']] if '주문일자' in header_indices else ''
+                            order_month_day = order_date_raw.split(" ")[0]
+
+                            if order_month_day not in target_dates:
+                                continue
+
+                            quantity = convert_to_number(row[header_indices['수량']] if '수량' in header_indices else '0')
+                            order_amount = convert_to_number(row[header_indices['주문액']] if '주문액' in header_indices else '0')
+                            selling_price = convert_to_number(row[header_indices['판매가']] if '판매가' in header_indices else '0')
+                            shipping_fee = convert_to_number(row[header_indices['배송비']] if '배송비' in header_indices else '0')
+
+                            selected_columns_data.append(row[header_indices['주문일자']] if '주문일자' in header_indices else '')
+                            selected_columns_data.append(quantity)
+                            selected_columns_data.append(row[header_indices['상품명']] if '상품명' in header_indices else '')
+                            selected_columns_data.append(row[header_indices['옵션명']] if '옵션명' in header_indices else '')
+                            selected_columns_data.append(row[header_indices['상품주문번호']] if '상품주문번호' in header_indices else '')
+                            selected_columns_data.append(row[header_indices['주문번호']] if '주문번호' in header_indices else '')
+                            selected_columns_data.append(row[header_indices['주문자명']] if '주문자명' in header_indices else '')
+                            selected_columns_data.append(row[header_indices['연락처']] if '연락처' in header_indices else '')
+                            selected_columns_data.append(row[header_indices['수령자명']] if '수령자명' in header_indices else '')
+                            selected_columns_data.append(row[header_indices['택배사']] if '택배사' in header_indices else '')
+                            selected_columns_data.append(row[header_indices['운송장번호']] if '운송장번호' in header_indices else '')
+                            selected_columns_data.append(row[header_indices['셀픽주문번호']] if '셀픽주문번호' in header_indices else '')
+                            selected_columns_data.append(order_amount)
+                            selected_columns_data.append(selling_price)
+                            selected_columns_data.append(shipping_fee)
+                            selected_columns_data.append(row[header_indices['수령지']] if '수령지' in header_indices else '')
+                            selected_columns_data.append(row[header_indices['요청사항']] if '요청사항' in header_indices else '')
+                            selected_columns_data.append(row[header_indices['발송']] if '발송' in header_indices else '')
+                            selected_columns_data.append(row[header_indices['구매자 전화번호']] if '구매자 전화번호' in header_indices else '')
+                            selected_columns_data.append(row[header_indices['상품번호']] if '상품번호' in header_indices else '')
+                            selected_columns_data.append(row[header_indices['개인통관고유부호']] if '개인통관고유부호' in header_indices else '')
+                            selected_columns_data.append(row[header_indices['판매자상품코드']] if '판매자상품코드' in header_indices else '')
+                            selected_columns_data.append(row[header_indices['상품관리사유']] if '상품관리사유' in header_indices else '')
+                            selected_columns_data.append(sheet_name)
+
+                        data.append(selected_columns_data)
+
+                    all_data.extend(data)
+                except WorksheetNotFound:
+                    print(f"Worksheet '{sheet_name}' not found, skipping.")
+                except Exception as e:
+                    print(f"Error processing sheet '{sheet_name}': {e}")
+
+            return all_data
+        except Exception as e:
+            print(f"Error accessing spreadsheet: {e}")
+            return []
+
+    return read_sheet_data_within_date_range(sheet, target_dates)
+
+def paste_data_to_new_workbook(data):
+    workbook = Workbook()
+    db_sheet = workbook.active
+    db_sheet.title = 'sales_data'
+    cancel_sheet = workbook.create_sheet('cancel_info')
+
+    headers = ['주문일자', '수량', '상품명', '옵션명', '상품주문번호', '주문번호', '주문자명', '연락처', '수령자명', '택배사', '운송장번호', '셀픽주문번호', '주문액', '판매가', '배송비', '수령지', '요청사항', '발송', '구매자 전화번호', '상품번호', '개인통관고유부호', '시트명', '판매자상품코드', '스토어명']
+    db_sheet.append(headers)
+    cancel_sheet.append(headers)
+
+    for row in data:
+        order_number = row[headers.index('주문번호')]
+        if order_number.upper().startswith('CS_'):
+            cancel_sheet.append(row)
+        else:
+            db_sheet.append(row)
+
+    return workbook
+
+def process_spreadsheet_data(date_range):
+    spreadsheet_urls = [
+        "https://docs.google.com/spreadsheets/d/11XL2PSTJ6Kvwj320sATSsjjgWG-um7XD4dZBMmi0Qb8/edit#gid=0",
+        "https://docs.google.com/spreadsheets/d/14oMslSf-WIUI_EH2nnwSNTZN_mlpd_YQFnH2bw7Pr3A/edit#gid=1570192091",
+        "https://docs.google.com/spreadsheets/d/1XvlnYDspY9QdBa4FrZWQqMmuOlHd6WfJq6CtP8nCXEk/edit#gid=510257355"
+    ]
+
+    target_dates = []
+    start_date, end_date = [datetime.strptime(date.strip(), "%m/%d") for date in date_range.split('-')]
+    delta = end_date - start_date
+
+    for i in range(delta.days + 1):
+        target_date = (start_date + timedelta(days=i)).strftime("%m/%d")
+        target_dates.append(target_date)
+
+    all_data = []
+    required_sheets = ['땡삼', '꾸까','대광사','allkpopmag', '메리하울', 'MTA', '웨이브인', '이달의딜', '아송샵', '11번가', '인터파크', '지마켓', '지마켓_와이에스', '쿠팡_올케이팝','옥션_플래너', '지마켓_플래너', '옥션_와이에스',
+                      '옥션', '도매의신', '롯데온', '신세계', '위메프', '멸치', '쿠팡_링고투', '쿠팡_링고','지마켓_키킷', '올웨이즈', '올웨이즈_플래너', '오늘의집', '큐텐재팬_판매량']
+
+    # required_sheets = ['땡삼']
+
+
+
+
+    for url in spreadsheet_urls:
+        data = read_google_spreadsheet(url, target_dates, required_sheets)
+        all_data.extend(data)
+
+    today_date = datetime.today().strftime('%Y%m%d')
+    save_folder_path = r"C:\Users\ohlee\OneDrive\바탕 화면\자동화코드\매출데이터"
+    
+    base_file_name = f"{today_date}_sales_data_combined"
+    file_extension = ".xlsx"
+
+    counter = 1
+    output_file_path = os.path.join(save_folder_path, f"{base_file_name}{file_extension}")
+    while os.path.exists(output_file_path):
+        output_file_path = os.path.join(save_folder_path, f"{base_file_name}_{counter}{file_extension}")
+        counter += 1
+
+    if not os.path.exists(output_file_path):
+        new_workbook = paste_data_to_new_workbook(all_data)
+        new_workbook.save(output_file_path)
+        print(f"Data import complete for combined data. Output file path: {output_file_path}")
+    else:
+        print("File already exists, skipping.")
+
+    return output_file_path
+
+def process_and_update_sales_data():
+    today = datetime.today()
+    # 현재 날짜에 따른 분기 시작 및 종료 날짜 계산
+    current_month = today.month
+    if current_month in [1, 2, 3]:
+        start_date = today.replace(month=1, day=1)
+        end_date = today.replace(month=3, day=31)
+    elif current_month in [4, 5, 6]:
+        start_date = today.replace(month=4, day=1)
+        end_date = today.replace(month=6, day=30)
+    elif current_month in [7, 8, 9]:
+        start_date = today.replace(month=7, day=1)
+        end_date = today.replace(month=9, day=30)
+    else:  # 10, 11, 12월의 경우
+        start_date = today.replace(month=10, day=1)
+        end_date = today.replace(month=12, day=31)
+
+    date_range = f"{start_date.strftime('%m/%d')}-{end_date.strftime('%m/%d')}"
+    print(f"분기별 날짜 범위: {date_range}")
+    
+    file_path = process_spreadsheet_data(date_range)
+    sales_data = pd.read_excel(file_path)
+
+    google_sheet_url = "https://docs.google.com/spreadsheets/d/1fRwYoopG5nhWGrrZZxcWiLTTUXynL7Nnpvlcd4XMSXI/edit?gid=2031649154#gid=2031649154"
+    update_google_spreadsheet(sales_data, 'sales_data', google_sheet_url)
+    print("구글 스프레드시트로 매출 데이터가 업데이트되었습니다.")
+
+# Tkinter로 버튼 생성
+def create_update_button():
+    root = tk.Tk()
+    root.title("매출 데이터 업데이트")
+
+    def on_update_click():
+        print("매출 데이터 업데이트 시작...")
+        process_and_update_sales_data()
+
+    update_button = tk.Button(root, text="매출 데이터 업데이트", command=on_update_click)
+    update_button.pack(pady=20)
+
+    root.mainloop()
+
+# 일정 시간마다 작업을 실행하는 함수
+def scheduled_task():
+    while True:
+        current_time = datetime.now()
+        if current_time.hour == 19 and current_time.minute == 30:
+            print("오후 5시 5분. 자동 매출 데이터 업데이트 시작.")
+            process_and_update_sales_data()
+        time.sleep(60)
+
+if __name__ == "__main__":
+    from threading import Thread
+    Thread(target=scheduled_task).start()
+    create_update_button()
